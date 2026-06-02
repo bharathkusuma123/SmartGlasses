@@ -1,0 +1,80 @@
+{
+  "expo": {
+    "name": "SmartGlasses",
+    "slug": "SmartGlasses",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "plugins": [
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": true,
+          "modes": [
+            "central",
+            "peripheral"
+          ],
+          "bluetoothAlwaysPermission": "Allow SmartGlasses to connect to Bluetooth devices"
+        }
+      ],
+      "expo-build-properties",
+        [
+        "expo-image-picker",
+        {
+          "photosPermission": "SmartGlasses accesses your photos to share with connected devices",
+          "cameraPermission": "SmartGlasses accesses your camera to take photos"
+        }
+      ]
+
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "SmartGlasses uses Bluetooth to discover and connect to smart glasses devices",
+        "NSBluetoothPeripheralUsageDescription": "SmartGlasses uses Bluetooth to communicate with smart glasses"
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ],
+      "package": "com.test_user79.SmartGlasses"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "62c66cc2-6a13-4f31-ab89-be80f7882f08"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/62c66cc2-6a13-4f31-ab89-be80f7882f08"
+    }
+  }
+}
