@@ -1,0 +1,20 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.smartglasses.heycyan'
+version = '1.0.0'
+
+android {
+  namespace "com.smartglasses.heycyan"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+  }
+}
+
+dependencies {
+  implementation files('libs/glasses_sdk_20250723_v01.aar')
+  implementation 'androidx.localbroadcastmanager:localbroadcastmanager:1.1.0'
+}

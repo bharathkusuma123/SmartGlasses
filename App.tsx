@@ -1,12 +1,12 @@
 import React from 'react';
 import { SafeAreaView, StyleSheet, StatusBar } from 'react-native';
-import BluetoothScanner from './src/components/BluetoothScanner';
+import DiagnosticScreen from './src/screens/DiagnosticScreen';
 
 const App = () => {
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#f5f5f5" />
-      <BluetoothScanner />
+      <DiagnosticScreen />
     </SafeAreaView>
   );
 };

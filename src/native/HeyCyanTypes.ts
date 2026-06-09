@@ -2,8 +2,9 @@
 export interface HeyCyanDevice {
   id: string;
   name: string;
-  macAddress: string;
+  macAddress?: string;
   rssi: number;
+  scanRecordHex?: string;
 }
 
 export interface BatteryStatus {
@@ -24,6 +25,23 @@ export interface DeviceVersion {
   wifiFirmware: string;
 }
 
+export interface SdkState {
+  initialized: boolean;
+  connected: boolean;
+  ready: boolean;
+  deviceAddress: string;
+  waitingForPhotoTransfer?: boolean;
+  photoDelivered?: boolean;
+  respMapKeys: string;
+  noClearMapKeys: string;
+}
+
+export interface SdkLogEvent {
+  level: string;
+  message: string;
+  timestamp: number;
+}
+
 export interface CapturedPhoto {
   id: string;
   uri: string;
@@ -38,9 +56,20 @@ export interface HeyCyanEvents {
   onDeviceDiscovered: (device: HeyCyanDevice) => void;
   onDeviceConnected: (device: HeyCyanDevice) => void;
   onDeviceDisconnected: (deviceId: string) => void;
+  onBluetoothStateChanged: (status: Record<string, unknown>) => void;
+  onScanResult: (device: HeyCyanDevice) => void;
+  onConnecting: (device: Partial<HeyCyanDevice>) => void;
+  onConnected: (device: HeyCyanDevice) => void;
+  onDisconnected: (event: Record<string, unknown>) => void;
   onBatteryUpdate: (status: BatteryStatus) => void;
   onMediaCountsUpdate: (counts: MediaCounts) => void;
+  onMediaUpdate: (counts: MediaCounts) => void;
   onPhotoReceived: (photoBase64: string, photoId: string) => void;  // New: when glasses take photo
+  onPhotoStarted: (event: Record<string, unknown>) => void;
+  onPhotoCompleted: (event: Record<string, unknown>) => void;
+  onPhotoFailed: (event: Record<string, unknown>) => void;
   onAIImageReceived: (imageBase64: string) => void;
+  onSdkLog: (event: SdkLogEvent) => void;
+  onSdkError: (event: Record<string, unknown>) => void;
   onError: (error: string) => void;
 }

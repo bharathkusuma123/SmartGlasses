@@ -25,13 +25,14 @@
         }
       ],
       "expo-build-properties",
-        [
+      [
         "expo-image-picker",
         {
           "photosPermission": "SmartGlasses accesses your photos to share with connected devices",
           "cameraPermission": "SmartGlasses accesses your camera to take photos"
         }
-      ]
+      ],
+      "./plugins/with-gradle-direct-download"
 
     ],
     "ios": {
@@ -58,8 +59,13 @@
         "android.permission.BLUETOOTH_ADMIN",
         "android.permission.BLUETOOTH_SCAN",
         "android.permission.BLUETOOTH_CONNECT",
-        "android.permission.ACCESS_FINE_LOCATION"
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.NEARBY_WIFI_DEVICES",
+        "android.permission.INTERNET",
+        "android.permission.CAMERA"
       ],
+      "usesCleartextTraffic": true,
       "package": "com.test_user79.SmartGlasses"
     },
     "web": {
