@@ -3,15 +3,24 @@ package com.smartglasses.heycyan
 import android.app.Application
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.le.ScanResult
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.util.Base64
 import android.util.Log
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import androidx.core.os.bundleOf
 import com.oudmon.ble.base.bluetooth.BleOperateManager
 import com.oudmon.ble.base.bluetooth.DeviceManager
+import com.oudmon.ble.base.bluetooth.OnGattEventCallback
 import com.oudmon.ble.base.communication.ILargeDataResponse
 import com.oudmon.ble.base.communication.LargeDataHandler
+import com.oudmon.ble.base.communication.bigData.resp.BatteryResponse
+import com.oudmon.ble.base.communication.bigData.resp.DeviceInfoResponse
 import com.oudmon.ble.base.communication.bigData.resp.GlassesDeviceNotifyRsp
 import com.oudmon.ble.base.communication.bigData.resp.GlassModelControlResponse
+import com.oudmon.ble.base.communication.bigData.resp.SyncTimeResponse
 import com.oudmon.ble.base.scan.BleScannerHelper
 import com.oudmon.ble.base.scan.ScanRecord
 import com.oudmon.ble.base.scan.ScanWrapperCallback
@@ -20,15 +29,87 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class HeyCyanGlassesModule : Module() {
   private val tag = "HeyCyanGlasses"
   private val initialized = AtomicBoolean(false)
+  private val sdkCoreInitialized = AtomicBoolean(false)
+  private val sdkReceiversRegistered = AtomicBoolean(false)
+  private val serviceDiscovered = AtomicBoolean(false)
+  private val characteristicsDiscovered = AtomicBoolean(false)
+  private val notificationsEnabled = AtomicBoolean(false)
+  private val largeDataEnableRequested = AtomicBoolean(false)
+  private val largeDataNotificationsEnabled = AtomicBoolean(false)
+  private val timeSynced = AtomicBoolean(false)
   private val waitingForPhotoTransfer = AtomicBoolean(false)
   private val photoDelivered = AtomicBoolean(false)
   private val jsListenersActive = AtomicBoolean(false)
   private val notifyListenerKey = 0x4843
+
+  private val actionGattConnected = "com.swatchdevice.pro.sdk.ble.gatt_connected"
+  private val actionGattDisconnected = "com.swatchdevice.pro.sdk.ble.gatt_disconnected"
+  private val actionServiceDiscovered = "com.swatchdevice.pro.sdk.ble.service_discovered"
+  private val actionCharacteristicRead = "com.swatchdevice.pro.sdk.ble.characteristic_read"
+  private val actionCharacteristicNotification = "com.swatchdevice.pro.sdk.ble.characteristic_notification_qc"
+  private val actionCharacteristicWrite = "com.swatchdevice.pro.characteristic_write_qc"
+  private val actionCharacteristicChanged = "com.swatchdevice.pro.characteristic_changed_qc"
+  private val actionBleNoCallback = "com.swatchdevice.pro.sdk.ble.BLE_NO_CALLBACK"
+  private val actionBleStatus = "com.swatchdevice.pro.sdk.ble.BLE_STATUS"
+
+  private val sdkLifecycleReceiver = object : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+      when (intent.action) {
+        actionGattConnected -> {
+          val address = intent.getStringExtra("ADDRESS") ?: DeviceManager.getInstance().deviceAddress
+          sdkLog("[SDK] Connected broadcast address=$address")
+        }
+        actionGattDisconnected, actionBleNoCallback -> {
+          resetLifecycleFlags()
+          val address = intent.getStringExtra("ADDRESS") ?: DeviceManager.getInstance().deviceAddress
+          sdkLog("[SDK] Disconnected broadcast action=${intent.action} address=$address", if (intent.action == actionBleNoCallback) "error" else "info")
+          sendEvent("onDisconnected", bundleOf("deviceId" to address, "action" to intent.action))
+        }
+        actionServiceDiscovered -> {
+          serviceDiscovered.set(true)
+          characteristicsDiscovered.set(true)
+          sdkLog("[SDK] Services Discovered")
+          sdkLog("[SDK] Characteristics Discovered")
+        }
+        actionCharacteristicNotification -> {
+          if (largeDataEnableRequested.get()) {
+            largeDataNotificationsEnabled.set(true)
+            sdkLog("[SDK] Large Data Notifications Enabled")
+          } else {
+            notificationsEnabled.set(true)
+            sdkLog("[SDK] Notifications Enabled")
+          }
+        }
+        actionCharacteristicRead -> {
+          val uuid = intent.getStringExtra("CHARACTER_UUID") ?: ""
+          val status = intent.getIntExtra("STATUS", -1)
+          val data = intent.getByteArrayExtra("VALUE") ?: byteArrayOf()
+          sdkLog("[SDK] READ uuid=$uuid status=$status value=${hex(data)}")
+        }
+        actionCharacteristicWrite -> {
+          val uuid = intent.getStringExtra("CHARACTER_UUID") ?: ""
+          val status = intent.getIntExtra("STATUS", -1)
+          val data = intent.getByteArrayExtra("DATA") ?: byteArrayOf()
+          sdkLog("[SDK] WRITE uuid=$uuid status=$status value=${hex(data)}")
+        }
+        actionCharacteristicChanged -> {
+          val uuid = intent.getStringExtra("CHARACTER_UUID") ?: ""
+          val data = intent.getByteArrayExtra("VALUE") ?: byteArrayOf()
+          logRawNotification(uuid, data, "broadcast")
+        }
+        actionBleStatus -> {
+          sdkLog("[SDK] BLE status=${intent.getIntExtra("EXTRA_STATUS", -1)} newState=${intent.getIntExtra("EXTRA_BLE_NEW_STATE", -1)}")
+        }
+      }
+    }
+  }
 
   override fun definition() = ModuleDefinition {
     Name("HeyCyanGlasses")
@@ -52,6 +133,7 @@ class HeyCyanGlassesModule : Module() {
       "onPhotoStarted",
       "onPhotoCompleted",
       "onPhotoFailed",
+      "onBleNotification",
       "onSdkError",
       "onError"
     )
@@ -69,11 +151,10 @@ class HeyCyanGlassesModule : Module() {
     AsyncFunction("initialize") {
       val app = application()
       sdkLog("initialize(): application=${app.packageName}")
-      BleOperateManager.getInstance(app)
-      LargeDataHandler.getInstance().initEnable()
+      initializeSdkCore(app)
       registerGlassesNotifyListener()
       initialized.set(true)
-      sdkLog("initialize(): initEnable and notify listener registered")
+      sdkLog("initialize(): SDK core, lifecycle receiver, raw callback, and notify listener registered")
       true
     }
 
@@ -81,14 +162,16 @@ class HeyCyanGlassesModule : Module() {
       ensureInitialized()
       sdkLog("connect(): deviceId=$deviceId")
       sendEvent("onConnecting", bundleOf("id" to deviceId))
+      resetLifecycleFlags()
       DeviceManager.getInstance().deviceAddress = deviceId
       BleOperateManager.getInstance().connectDirectly(deviceId)
-      waitForConnection()
+      waitForReadyConnection()
     }
 
     AsyncFunction("disconnect") {
       sdkLog("disconnect()")
       BleOperateManager.getInstance().disconnect()
+      resetLifecycleFlags()
       waitingForPhotoTransfer.set(false)
       sendEvent("onDeviceDisconnected", bundleOf("deviceId" to DeviceManager.getInstance().deviceAddress))
       sendEvent("onDisconnected", bundleOf("deviceId" to DeviceManager.getInstance().deviceAddress))
@@ -98,8 +181,14 @@ class HeyCyanGlassesModule : Module() {
     AsyncFunction("isConnected") {
       val connected = BleOperateManager.getInstance().isConnected
       val ready = BleOperateManager.getInstance().isReady
-      sdkLog("isConnected(): connected=$connected ready=$ready; capture only requires connected")
+      sdkLog("isConnected(): connected=$connected ready=$ready")
       connected
+    }
+
+    AsyncFunction("isReady") {
+      val ready = BleOperateManager.getInstance().isReady
+      sdkLog("isReady(): ready=$ready")
+      ready
     }
 
     AsyncFunction("takePhoto") {
@@ -109,8 +198,7 @@ class HeyCyanGlassesModule : Module() {
       sdkLog("takePhoto(): connected=$connected ready=$ready")
       sendCaptureStatus("preflight", "connected=$connected ready=$ready")
 
-      if (!connected) {
-        sendError("Cannot take photo: SDK BLE session is not connected")
+      if (!ensureDeviceReadyForCommand("takePhoto")) {
         false
       } else {
         waitingForPhotoTransfer.set(true)
@@ -126,23 +214,26 @@ class HeyCyanGlassesModule : Module() {
 
     AsyncFunction("getBattery") {
       ensureInitialized()
-      sdkLog("getBattery(): requesting battery sync")
-      LargeDataHandler.getInstance().addBatteryCallBack("react-native") { _, response ->
-        if (response != null) {
-          val payload = bundleOf(
-            "level" to response.battery,
-            "isCharging" to response.isCharging
-          )
-          sdkLog("onBatteryUpdate: $payload")
-          sendEvent("onBatteryUpdate", payload)
-        }
+      if (!ensureDeviceReadyForCommand("getBattery")) {
+        return@AsyncFunction bundleOf("level" to -1, "isCharging" to false, "error" to "Device not ready")
       }
-      LargeDataHandler.getInstance().syncBattery()
-      bundleOf("level" to 0, "isCharging" to false)
+
+      sdkLog("[SDK] Battery Request")
+      val response = requestBatteryBlocking()
+      if (response == null) {
+        sendError("[SDK] Battery request timed out")
+        bundleOf("level" to -1, "isCharging" to false, "error" to "Battery timeout")
+      } else {
+        bundleOf("level" to response.battery, "isCharging" to response.isCharging)
+      }
     }
 
     AsyncFunction("getMediaCounts") {
       ensureInitialized()
+      if (!ensureDeviceReadyForCommand("getMediaCounts")) {
+        return@AsyncFunction bundleOf("photos" to -1, "videos" to -1, "audios" to -1, "error" to "Device not ready")
+      }
+
       sdkLog("getMediaCounts(): sending glassesControl [0x02, 0x04]")
       LargeDataHandler.getInstance().glassesControl(byteArrayOf(0x02, 0x04)) { _, response ->
         if (response.dataType == 4) {
@@ -161,24 +252,37 @@ class HeyCyanGlassesModule : Module() {
 
     AsyncFunction("syncTime") {
       ensureInitialized()
-      sdkLog("syncTime()")
-      LargeDataHandler.getInstance().syncTime { cmdType, response ->
-        sdkLog("syncTime response: cmdType=$cmdType response=$response")
+      if (!ensureDeviceReadyForCommand("syncTime")) {
+        return@AsyncFunction false
       }
-      true
+
+      performTimeSyncBlocking()
     }
 
     AsyncFunction("getVersionInfo") {
       ensureInitialized()
-      sdkLog("getVersionInfo()")
-      LargeDataHandler.getInstance().syncDeviceInfo { _, response ->
-        sdkLog("getVersionInfo response: $response")
+      if (!ensureDeviceReadyForCommand("getVersionInfo")) {
+        return@AsyncFunction bundleOf("hardware" to "", "firmware" to "", "wifiHardware" to "", "wifiFirmware" to "", "error" to "Device not ready")
       }
-      bundleOf("hardware" to "", "firmware" to "", "wifiHardware" to "", "wifiFirmware" to "")
+
+      sdkLog("[SDK] Version Request")
+      val response = requestVersionBlocking()
+      if (response == null) {
+        sendError("[SDK] Version request timed out")
+        bundleOf("hardware" to "", "firmware" to "", "wifiHardware" to "", "wifiFirmware" to "", "error" to "Version timeout")
+      } else {
+        deviceInfoBundle(response)
+      }
     }
 
     AsyncFunction("enableNotifications") {
       ensureInitialized()
+      sdkLog("[SDK] Notifications Enabling")
+      val beforeReady = BleOperateManager.getInstance().isReady
+      if (!beforeReady && BleOperateManager.getInstance().isConnected) {
+        sdkLog("[SDK] enableNotifications(): waiting for SDK ready gate")
+      }
+      largeDataEnableRequested.set(true)
       LargeDataHandler.getInstance().initEnable()
       registerGlassesNotifyListener()
       sdkLog("enableNotifications(): initEnable and out-device listener registered")
@@ -186,6 +290,9 @@ class HeyCyanGlassesModule : Module() {
         "initialized" to initialized.get(),
         "connected" to BleOperateManager.getInstance().isConnected,
         "ready" to BleOperateManager.getInstance().isReady,
+        "notificationsEnabled" to notificationsEnabled.get(),
+        "largeDataNotificationsEnabled" to largeDataNotificationsEnabled.get(),
+        "timeSynced" to timeSynced.get(),
         "deviceAddress" to DeviceManager.getInstance().deviceAddress,
         "respMapKeys" to LargeDataHandler.getInstance().respMap.keys.joinToString(","),
         "noClearMapKeys" to LargeDataHandler.getInstance().noClearMap.keys.joinToString(",")
@@ -198,6 +305,11 @@ class HeyCyanGlassesModule : Module() {
         "initialized" to initialized.get(),
         "connected" to BleOperateManager.getInstance().isConnected,
         "ready" to BleOperateManager.getInstance().isReady,
+        "serviceDiscovered" to serviceDiscovered.get(),
+        "characteristicsDiscovered" to characteristicsDiscovered.get(),
+        "notificationsEnabled" to notificationsEnabled.get(),
+        "largeDataNotificationsEnabled" to largeDataNotificationsEnabled.get(),
+        "timeSynced" to timeSynced.get(),
         "deviceAddress" to DeviceManager.getInstance().deviceAddress,
         "waitingForPhotoTransfer" to waitingForPhotoTransfer.get(),
         "photoDelivered" to photoDelivered.get(),
@@ -236,11 +348,44 @@ class HeyCyanGlassesModule : Module() {
   private fun ensureInitialized() {
     if (!initialized.get()) {
       sdkLog("ensureInitialized(): lazy initialize")
-      BleOperateManager.getInstance(application())
-      LargeDataHandler.getInstance().initEnable()
+      initializeSdkCore(application())
       registerGlassesNotifyListener()
       initialized.set(true)
     }
+  }
+
+  private fun initializeSdkCore(app: Application) {
+    val manager = BleOperateManager.getInstance(app)
+    if (sdkCoreInitialized.compareAndSet(false, true)) {
+      manager.init()
+      sdkLog("initializeSdkCore(): BleOperateManager.init() registered SDK internal receivers")
+    }
+    registerSdkLifecycleReceiver(app)
+    manager.setCallback(object : OnGattEventCallback {
+      override fun onReceivedData(uuid: String, data: ByteArray) {
+        logRawNotification(uuid, data, "callback")
+      }
+    })
+  }
+
+  private fun registerSdkLifecycleReceiver(app: Application) {
+    if (!sdkReceiversRegistered.compareAndSet(false, true)) {
+      return
+    }
+
+    val filter = IntentFilter().apply {
+      addAction(actionGattConnected)
+      addAction(actionGattDisconnected)
+      addAction(actionServiceDiscovered)
+      addAction(actionCharacteristicRead)
+      addAction(actionCharacteristicNotification)
+      addAction(actionCharacteristicWrite)
+      addAction(actionCharacteristicChanged)
+      addAction(actionBleNoCallback)
+      addAction(actionBleStatus)
+    }
+    LocalBroadcastManager.getInstance(app).registerReceiver(sdkLifecycleReceiver, filter)
+    sdkLog("registerSdkLifecycleReceiver(): SDK BLE broadcasts registered")
   }
 
   private fun registerGlassesNotifyListener() {
@@ -308,27 +453,56 @@ class HeyCyanGlassesModule : Module() {
     sendEvent("onScanResult", payload)
   }
 
-  private fun waitForConnection(): Boolean {
-    repeat(20) { attempt ->
+  private fun waitForReadyConnection(): Boolean {
+    var connectedEventSent = false
+    var notificationInitRequested = false
+    var readyForcedAfterNotify = false
+
+    repeat(120) { attempt ->
       val connected = BleOperateManager.getInstance().isConnected
       val ready = BleOperateManager.getInstance().isReady
-      sdkLog("connect poll ${attempt + 1}: connected=$connected ready=$ready")
-      if (connected) {
+      sdkLog("connect poll ${attempt + 1}: connected=$connected ready=$ready notifications=${notificationsEnabled.get()} largeData=${largeDataNotificationsEnabled.get()} timeSynced=${timeSynced.get()}")
+
+      if (connected && !connectedEventSent) {
         val payload = bundleOf("id" to DeviceManager.getInstance().deviceAddress, "name" to DeviceManager.getInstance().deviceName)
         sdkLog("[SDK] Connected ${DeviceManager.getInstance().deviceAddress}")
         sendEvent("onDeviceConnected", payload)
         sendEvent("onConnected", payload)
+        connectedEventSent = true
+      }
+
+      if (connected && notificationsEnabled.get() && !readyForcedAfterNotify && !ready) {
+        sdkLog("[SDK] Notification confirmation received; setting SDK ready=true")
+        BleOperateManager.getInstance().setReady(true)
+        readyForcedAfterNotify = true
+      }
+
+      if (connected && BleOperateManager.getInstance().isReady && !notificationInitRequested) {
+        sdkLog("[SDK] Ready State TRUE")
+        sendEvent("onBluetoothStateChanged", bundleOf("state" to "ready"))
+        sdkLog("[SDK] Notifications Enabling")
+        largeDataEnableRequested.set(true)
+        LargeDataHandler.getInstance().initEnable()
+        registerGlassesNotifyListener()
+        notificationInitRequested = true
+      }
+
+      if (connected && BleOperateManager.getInstance().isReady && notificationInitRequested && largeDataNotificationsEnabled.get()) {
+        if (!timeSynced.get()) {
+          performTimeSyncBlocking()
+        }
         return true
       }
       Thread.sleep(250)
     }
 
     val connected = BleOperateManager.getInstance().isConnected
-    sdkLog("connect finished: connected=$connected ready=${BleOperateManager.getInstance().isReady}")
-    if (!connected) {
-      sendEvent("onSdkError", bundleOf("message" to "SDK connect timeout", "deviceId" to DeviceManager.getInstance().deviceAddress))
+    val ready = BleOperateManager.getInstance().isReady
+    sdkLog("connect finished: connected=$connected ready=$ready notifications=${notificationsEnabled.get()} largeData=${largeDataNotificationsEnabled.get()}")
+    if (!connected || !ready) {
+      sendEvent("onSdkError", bundleOf("message" to "SDK connect/ready timeout", "deviceId" to DeviceManager.getInstance().deviceAddress, "connected" to connected, "ready" to ready, "notificationsEnabled" to notificationsEnabled.get()))
     }
-    return connected
+    return connected && ready
   }
 
   private fun handleCaptureResponse(cmdType: Int, response: GlassModelControlResponse) {
@@ -380,8 +554,7 @@ class HeyCyanGlassesModule : Module() {
 
   private fun handleGlassesNotify(cmdType: Int, response: GlassesDeviceNotifyRsp) {
     val data = response.loadData ?: return
-    val hex = data.joinToString(" ") { "%02X".format(it) }
-    sdkLog("glasses notify: cmdType=$cmdType bytes=${data.size} data=$hex")
+    sdkLog("glasses notify: cmdType=$cmdType bytes=${data.size} data=${hex(data)}")
 
     val p2pIp = extractP2pIp(data) ?: run {
       return
@@ -450,6 +623,103 @@ class HeyCyanGlassesModule : Module() {
       ))
     }
   }
+
+  private fun logRawNotification(uuid: String, data: ByteArray, source: String) {
+    val payload = bundleOf(
+      "uuid" to uuid,
+      "hex" to hex(data),
+      "source" to source,
+      "timestamp" to System.currentTimeMillis()
+    )
+    sdkLog("[SDK] Notification Received ($source) uuid=$uuid RX: ${hex(data)}")
+    sendEvent("onBleNotification", payload)
+  }
+
+  private fun resetLifecycleFlags() {
+    serviceDiscovered.set(false)
+    characteristicsDiscovered.set(false)
+    notificationsEnabled.set(false)
+    largeDataEnableRequested.set(false)
+    largeDataNotificationsEnabled.set(false)
+    timeSynced.set(false)
+  }
+
+  private fun ensureDeviceReadyForCommand(commandName: String): Boolean {
+    val connected = BleOperateManager.getInstance().isConnected
+    val ready = BleOperateManager.getInstance().isReady
+    if (!connected || !ready) {
+      val message = "Device not ready for $commandName: connected=$connected ready=$ready"
+      sendError(message)
+      return false
+    }
+    return true
+  }
+
+  private fun performTimeSyncBlocking(): Boolean {
+    sdkLog("[SDK] Time Sync Started")
+    val latch = CountDownLatch(1)
+    var success = false
+    LargeDataHandler.getInstance().syncTime(object : ILargeDataResponse<SyncTimeResponse> {
+      override fun parseData(cmdType: Int, response: SyncTimeResponse) {
+        success = true
+        timeSynced.set(true)
+        sdkLog("[SDK] Time Sync Success cmdType=$cmdType response=$response")
+        latch.countDown()
+      }
+    })
+
+    if (!latch.await(6, TimeUnit.SECONDS)) {
+      sdkLog("[SDK] Time Sync Failed: timeout", "error")
+      sendEvent("onSdkError", bundleOf("message" to "Time sync timeout"))
+      return false
+    }
+
+    return success
+  }
+
+  private fun requestBatteryBlocking(): BatteryResponse? {
+    val latch = CountDownLatch(1)
+    var batteryResponse: BatteryResponse? = null
+    LargeDataHandler.getInstance().addBatteryCallBack("react-native") { _, response ->
+      if (response != null) {
+        batteryResponse = response
+        val payload = bundleOf(
+          "level" to response.battery,
+          "isCharging" to response.isCharging
+        )
+        sdkLog("[SDK] Battery Response $payload")
+        sendEvent("onBatteryUpdate", payload)
+        latch.countDown()
+      }
+    }
+    LargeDataHandler.getInstance().syncBattery()
+    latch.await(8, TimeUnit.SECONDS)
+    return batteryResponse
+  }
+
+  private fun requestVersionBlocking(): DeviceInfoResponse? {
+    val latch = CountDownLatch(1)
+    var versionResponse: DeviceInfoResponse? = null
+    LargeDataHandler.getInstance().syncDeviceInfo(object : ILargeDataResponse<DeviceInfoResponse> {
+      override fun parseData(cmdType: Int, response: DeviceInfoResponse) {
+        versionResponse = response
+        sdkLog("[SDK] Version Response cmdType=$cmdType response=$response")
+        sendEvent("onBluetoothStateChanged", bundleOf("state" to "version_received"))
+        latch.countDown()
+      }
+    })
+    latch.await(8, TimeUnit.SECONDS)
+    return versionResponse
+  }
+
+  private fun deviceInfoBundle(response: DeviceInfoResponse) = bundleOf(
+    "hardware" to response.hardwareVersion,
+    "firmware" to response.firmwareVersion,
+    "wifiHardware" to response.wifiHardwareVersion,
+    "wifiFirmware" to response.wifiFirmwareVersion
+  )
+
+  private fun hex(data: ByteArray): String = data.joinToString(" ") { "%02X".format(it) }
 
   private fun deliverPhoto(photoId: String, photoBytes: ByteArray) {
     if (!photoDelivered.compareAndSet(false, true)) {

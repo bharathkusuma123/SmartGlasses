@@ -29,6 +29,11 @@ export interface SdkState {
   initialized: boolean;
   connected: boolean;
   ready: boolean;
+  serviceDiscovered?: boolean;
+  characteristicsDiscovered?: boolean;
+  notificationsEnabled?: boolean;
+  largeDataNotificationsEnabled?: boolean;
+  timeSynced?: boolean;
   deviceAddress: string;
   waitingForPhotoTransfer?: boolean;
   photoDelivered?: boolean;
@@ -39,6 +44,13 @@ export interface SdkState {
 export interface SdkLogEvent {
   level: string;
   message: string;
+  timestamp: number;
+}
+
+export interface BleNotificationEvent {
+  uuid: string;
+  hex: string;
+  source: string;
   timestamp: number;
 }
 
@@ -68,6 +80,7 @@ export interface HeyCyanEvents {
   onPhotoStarted: (event: Record<string, unknown>) => void;
   onPhotoCompleted: (event: Record<string, unknown>) => void;
   onPhotoFailed: (event: Record<string, unknown>) => void;
+  onBleNotification: (event: BleNotificationEvent) => void;
   onAIImageReceived: (imageBase64: string) => void;
   onSdkLog: (event: SdkLogEvent) => void;
   onSdkError: (event: Record<string, unknown>) => void;

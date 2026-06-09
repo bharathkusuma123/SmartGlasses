@@ -1,6 +1,6 @@
 import { EventSubscription } from 'expo-modules-core';
 import { requireNativeModule } from 'expo';
-import { HeyCyanDevice, BatteryStatus, MediaCounts, DeviceVersion, SdkLogEvent, SdkState } from './HeyCyanTypes';
+import { HeyCyanDevice, BatteryStatus, MediaCounts, DeviceVersion, SdkLogEvent, SdkState, BleNotificationEvent } from './HeyCyanTypes';
 
 const HeyCyanGlasses = requireNativeModule('HeyCyanGlasses');
 
@@ -58,6 +58,12 @@ class HeyCyanManager {
     ensureNativeModule();
     log('isConnected()');
     return HeyCyanGlasses.isConnected();
+  }
+
+  isReady(): Promise<boolean> {
+    ensureNativeModule();
+    log('isReady()');
+    return HeyCyanGlasses.isReady();
   }
 
   // Device Controls
@@ -209,6 +215,10 @@ class HeyCyanManager {
 
   onPhotoFailed(callback: (event: Record<string, unknown>) => void): () => void {
     return this.addListener('onPhotoFailed', callback);
+  }
+
+  onBleNotification(callback: (event: BleNotificationEvent) => void): () => void {
+    return this.addListener('onBleNotification', callback);
   }
 
   onSdkLog(callback: (event: SdkLogEvent) => void): () => void {

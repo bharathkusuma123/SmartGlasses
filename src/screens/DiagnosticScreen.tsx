@@ -21,14 +21,21 @@ const DiagnosticScreen = () => {
   const [selectedDevice, setSelectedDevice] = useState<HeyCyanDevice | null>(null);
   const [checks, setChecks] = useState({
     connected: false,
+    ready: false,
+    time: false,
     battery: false,
     version: false,
     media: false,
   });
+  const [batteryStatus, setBatteryStatus] = useState('n/a');
+  const [firmwareStatus, setFirmwareStatus] = useState('n/a');
+  const [photoStatus, setPhotoStatus] = useState('idle');
   const [flow, setFlow] = useState({
     scanning: false,
     connecting: false,
     connected: false,
+    ready: false,
+    timeSynced: false,
     batteryReceived: false,
     versionReceived: false,
     mediaReceived: false,
@@ -38,7 +45,7 @@ const DiagnosticScreen = () => {
   });
 
   const canTakePhoto = useMemo(
-    () => checks.connected && checks.battery && checks.version && checks.media,
+    () => checks.connected && checks.ready && checks.time && checks.battery && checks.version && checks.media,
     [checks]
   );
 
@@ -73,11 +80,12 @@ const DiagnosticScreen = () => {
       }),
       HeyCyanManager.onDisconnected(event => {
         sdkLogger.warn('SDK', '[SDK] Disconnected', event);
-        setChecks({ connected: false, battery: false, version: false, media: false });
-        setFlow(previous => ({ ...previous, connecting: false, connected: false }));
+        setChecks({ connected: false, ready: false, time: false, battery: false, version: false, media: false });
+        setFlow(previous => ({ ...previous, connecting: false, connected: false, ready: false, timeSynced: false }));
       }),
       HeyCyanManager.onBatteryUpdate(status => {
         sdkLogger.info('SDK', '[SDK] Battery Received', status);
+        setBatteryStatus(`${status.level}%${status.isCharging ? ' charging' : ''}`);
         setChecks(previous => ({ ...previous, battery: true }));
         setFlow(previous => ({ ...previous, batteryReceived: true }));
       }),
@@ -88,18 +96,32 @@ const DiagnosticScreen = () => {
       }),
       HeyCyanManager.onPhotoStarted(event => {
         sdkLogger.info('SDK', '[SDK] Photo Started', event);
+        setPhotoStatus('started');
         setFlow(previous => ({ ...previous, photoStarted: true, photoCompleted: false, photoFailed: false }));
       }),
       HeyCyanManager.onPhotoCompleted(event => {
         sdkLogger.info('SDK', '[SDK] Photo Success', event);
+        setPhotoStatus('completed');
         setFlow(previous => ({ ...previous, photoCompleted: true, photoFailed: false }));
       }),
       HeyCyanManager.onPhotoFailed(event => {
         sdkLogger.error('SDK', '[SDK] Photo Failed', event);
+        setPhotoStatus('failed');
         setFlow(previous => ({ ...previous, photoFailed: true }));
       }),
       HeyCyanManager.onSdkLog(event => {
         sdkLogger.info('NATIVE', event.message, event);
+        if (event.message.includes('[SDK] Ready State TRUE')) {
+          setChecks(previous => ({ ...previous, ready: true }));
+          setFlow(previous => ({ ...previous, ready: true }));
+        }
+        if (event.message.includes('[SDK] Time Sync Success')) {
+          setChecks(previous => ({ ...previous, time: true }));
+          setFlow(previous => ({ ...previous, timeSynced: true }));
+        }
+      }),
+      HeyCyanManager.onBleNotification(event => {
+        sdkLogger.debug('BLE', `[SDK] Notification Received RX: ${event.hex}`, event);
       }),
       HeyCyanManager.onSdkError(event => {
         sdkLogger.error('SDK', '[SDK] Error', event);
@@ -135,11 +157,16 @@ const DiagnosticScreen = () => {
   const scan = () => runAction('Scan', async () => {
     setDevices([]);
     setSelectedDevice(null);
-    setChecks({ connected: false, battery: false, version: false, media: false });
+    setChecks({ connected: false, ready: false, time: false, battery: false, version: false, media: false });
+    setBatteryStatus('n/a');
+    setFirmwareStatus('n/a');
+    setPhotoStatus('idle');
     setFlow({
       scanning: true,
       connecting: false,
       connected: false,
+      ready: false,
+      timeSynced: false,
       batteryReceived: false,
       versionReceived: false,
       mediaReceived: false,
@@ -161,13 +188,19 @@ const DiagnosticScreen = () => {
     await HeyCyanManager.stopScan();
     const connected = await HeyCyanManager.connect(selectedDevice.id);
     sdkLogger.info('SDK', '[SDK] Connected result', { connected, deviceId: selectedDevice.id });
-    setChecks(previous => ({ ...previous, connected }));
-    setFlow(previous => ({ ...previous, connected, connecting: false, scanning: false }));
+    const ready = connected ? await HeyCyanManager.isReady() : false;
+    sdkLogger.info('SDK', '[SDK] Ready result', { ready, deviceId: selectedDevice.id });
+    setChecks(previous => ({ ...previous, connected, ready, time: ready }));
+    setFlow(previous => ({ ...previous, connected, ready, timeSynced: ready, connecting: false, scanning: false }));
   });
 
   const battery = () => runAction('Battery', async () => {
     const result = await HeyCyanManager.getBattery();
     sdkLogger.info('SDK', '[SDK] Battery immediate result', result);
+    if (result.level < 0) {
+      throw new Error('Battery failed: device not ready or timed out');
+    }
+    setBatteryStatus(`${result.level}%${result.isCharging ? ' charging' : ''}`);
     setChecks(previous => ({ ...previous, battery: true }));
     setFlow(previous => ({ ...previous, batteryReceived: true }));
   });
@@ -175,6 +208,11 @@ const DiagnosticScreen = () => {
   const version = () => runAction('Version', async () => {
     const result = await HeyCyanManager.getVersion();
     sdkLogger.info('SDK', '[SDK] Version Received', result);
+    const firmware = result.firmware || result.wifiFirmware || result.hardware || result.wifiHardware;
+    if (!firmware) {
+      throw new Error('Version failed: empty SDK response');
+    }
+    setFirmwareStatus(firmware);
     setChecks(previous => ({ ...previous, version: true }));
     setFlow(previous => ({ ...previous, versionReceived: true }));
   });
@@ -182,8 +220,35 @@ const DiagnosticScreen = () => {
   const mediaCount = () => runAction('Media Count', async () => {
     const result = await HeyCyanManager.getMediaCount();
     sdkLogger.info('SDK', '[SDK] Media Count immediate result', result);
+    if (result.photos < 0) {
+      throw new Error('Media count failed: device not ready');
+    }
     setChecks(previous => ({ ...previous, media: true }));
     setFlow(previous => ({ ...previous, mediaReceived: true }));
+  });
+
+  const showConnected = () => runAction('Show Connected', async () => {
+    const connected = await HeyCyanManager.isConnected();
+    sdkLogger.info('SDK', '[SDK] Show Connected', { connected });
+    setChecks(previous => ({ ...previous, connected }));
+    setFlow(previous => ({ ...previous, connected }));
+  });
+
+  const showReady = () => runAction('Show Ready', async () => {
+    const ready = await HeyCyanManager.isReady();
+    sdkLogger.info('SDK', '[SDK] Show Ready', { ready });
+    setChecks(previous => ({ ...previous, ready }));
+    setFlow(previous => ({ ...previous, ready }));
+  });
+
+  const syncTime = () => runAction('Sync Time', async () => {
+    const result = await HeyCyanManager.syncTime();
+    sdkLogger.info('SDK', '[SDK] Sync Time result', { result });
+    if (!result) {
+      throw new Error('Sync Time failed');
+    }
+    setChecks(previous => ({ ...previous, time: true }));
+    setFlow(previous => ({ ...previous, timeSynced: true }));
   });
 
   const takePhoto = () => runAction('Take Photo', async () => {
@@ -192,8 +257,13 @@ const DiagnosticScreen = () => {
     }
 
     sdkLogger.info('SDK', '[SDK] Take Photo Requested');
+    setPhotoStatus('requested');
     const result = await HeyCyanManager.takePhoto();
     sdkLogger.info('SDK', '[SDK] takePhoto() returned', { result });
+    if (!result) {
+      setPhotoStatus('rejected');
+      throw new Error('takePhoto rejected by native preflight');
+    }
   });
 
   const showLogs = () => {
@@ -205,6 +275,8 @@ const DiagnosticScreen = () => {
     ['Device List', devices.length > 0],
     ['SDK Connect', flow.connecting || flow.connected],
     ['Connected State', checks.connected],
+    ['Ready State', checks.ready],
+    ['Time Sync', checks.time],
     ['Battery', checks.battery],
     ['Version', checks.version],
     ['Media Count', checks.media],
@@ -230,11 +302,23 @@ const DiagnosticScreen = () => {
         <View style={styles.buttonGrid}>
           <DiagButton label="Scan" busy={busyAction === 'Scan'} onPress={scan} />
           <DiagButton label="Connect" busy={busyAction === 'Connect'} onPress={connect} disabled={!selectedDevice} />
-          <DiagButton label="Battery" busy={busyAction === 'Battery'} onPress={battery} disabled={!checks.connected} />
-          <DiagButton label="Version" busy={busyAction === 'Version'} onPress={version} disabled={!checks.connected} />
-          <DiagButton label="Media Count" busy={busyAction === 'Media Count'} onPress={mediaCount} disabled={!checks.connected} />
+          <DiagButton label="Show Connected" busy={busyAction === 'Show Connected'} onPress={showConnected} />
+          <DiagButton label="Show Ready" busy={busyAction === 'Show Ready'} onPress={showReady} />
+          <DiagButton label="Sync Time" busy={busyAction === 'Sync Time'} onPress={syncTime} disabled={!checks.ready} />
+          <DiagButton label="Battery" busy={busyAction === 'Battery'} onPress={battery} disabled={!checks.ready} />
+          <DiagButton label="Version" busy={busyAction === 'Version'} onPress={version} disabled={!checks.ready} />
+          <DiagButton label="Media Count" busy={busyAction === 'Media Count'} onPress={mediaCount} disabled={!checks.ready} />
           <DiagButton label="Take Photo" busy={busyAction === 'Take Photo'} onPress={takePhoto} disabled={!canTakePhoto} />
           <DiagButton label="Show Logs" onPress={showLogs} />
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Live State</Text>
+          <Text style={styles.stateText}>Connected: {String(checks.connected)}</Text>
+          <Text style={styles.stateText}>Ready: {String(checks.ready)}</Text>
+          <Text style={styles.stateText}>Battery: {batteryStatus}</Text>
+          <Text style={styles.stateText}>Firmware: {firmwareStatus}</Text>
+          <Text style={styles.stateText}>Photo Status: {photoStatus}</Text>
         </View>
 
         <View style={styles.section}>
@@ -377,6 +461,11 @@ const styles = StyleSheet.create({
   emptyText: {
     color: '#7b8794',
     fontSize: 13,
+  },
+  stateText: {
+    color: '#334e68',
+    fontSize: 13,
+    fontWeight: '600',
   },
   logHeader: {
     alignItems: 'center',
