@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Image,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -30,6 +31,7 @@ const DiagnosticScreen = () => {
   const [batteryStatus, setBatteryStatus] = useState('n/a');
   const [firmwareStatus, setFirmwareStatus] = useState('n/a');
   const [photoStatus, setPhotoStatus] = useState('idle');
+  const [capturedPhotoUri, setCapturedPhotoUri] = useState<string | null>(null);
   const [flow, setFlow] = useState({
     scanning: false,
     connecting: false,
@@ -101,13 +103,22 @@ const DiagnosticScreen = () => {
       }),
       HeyCyanManager.onPhotoCompleted(event => {
         sdkLogger.info('SDK', '[SDK] Photo Success', event);
-        setPhotoStatus('completed');
+        setPhotoStatus('Photo Captured Successfully');
         setFlow(previous => ({ ...previous, photoCompleted: true, photoFailed: false }));
       }),
       HeyCyanManager.onPhotoFailed(event => {
         sdkLogger.error('SDK', '[SDK] Photo Failed', event);
         setPhotoStatus('failed');
         setFlow(previous => ({ ...previous, photoFailed: true }));
+      }),
+      HeyCyanManager.onPhotoReceived((photoBase64, photoId, photoUri) => {
+        sdkLogger.info('SDK', '[SDK] Photo Received', {
+          photoId,
+          photoUri,
+          base64Length: photoBase64?.length ?? 0,
+        });
+        setCapturedPhotoUri(photoUri ?? `data:image/jpeg;base64,${photoBase64}`);
+        setPhotoStatus('Photo downloaded');
       }),
       HeyCyanManager.onSdkLog(event => {
         sdkLogger.info('NATIVE', event.message, event);
@@ -161,6 +172,7 @@ const DiagnosticScreen = () => {
     setBatteryStatus('n/a');
     setFirmwareStatus('n/a');
     setPhotoStatus('idle');
+    setCapturedPhotoUri(null);
     setFlow({
       scanning: true,
       connecting: false,
@@ -260,10 +272,16 @@ const DiagnosticScreen = () => {
     setPhotoStatus('requested');
     const result = await HeyCyanManager.takePhoto();
     sdkLogger.info('SDK', '[SDK] takePhoto() returned', { result });
-    if (!result) {
-      setPhotoStatus('rejected');
-      throw new Error('takePhoto rejected by native preflight');
+    if (result.success) {
+      setPhotoStatus('Photo Captured Successfully');
+      setFlow(previous => ({ ...previous, photoStarted: true, photoCompleted: true, photoFailed: false }));
+      setChecks(previous => ({ ...previous, media: true }));
+      return;
     }
+
+    setPhotoStatus('capture not confirmed');
+    setFlow(previous => ({ ...previous, photoFailed: true }));
+    throw new Error(result.message);
   });
 
   const showLogs = () => {
@@ -319,6 +337,7 @@ const DiagnosticScreen = () => {
           <Text style={styles.stateText}>Battery: {batteryStatus}</Text>
           <Text style={styles.stateText}>Firmware: {firmwareStatus}</Text>
           <Text style={styles.stateText}>Photo Status: {photoStatus}</Text>
+          {capturedPhotoUri && <Image source={{ uri: capturedPhotoUri }} style={styles.previewImage} />}
         </View>
 
         <View style={styles.section}>
@@ -466,6 +485,14 @@ const styles = StyleSheet.create({
     color: '#334e68',
     fontSize: 13,
     fontWeight: '600',
+  },
+  previewImage: {
+    backgroundColor: '#111',
+    borderRadius: 6,
+    height: 220,
+    marginTop: 8,
+    resizeMode: 'contain',
+    width: '100%',
   },
   logHeader: {
     alignItems: 'center',

@@ -1,6 +1,6 @@
 import { EventSubscription } from 'expo-modules-core';
 import { requireNativeModule } from 'expo';
-import { HeyCyanDevice, BatteryStatus, MediaCounts, DeviceVersion, SdkLogEvent, SdkState, BleNotificationEvent } from './HeyCyanTypes';
+import { HeyCyanDevice, BatteryStatus, MediaCounts, DeviceVersion, SdkLogEvent, SdkState, BleNotificationEvent, PhotoCaptureResult } from './HeyCyanTypes';
 
 const HeyCyanGlasses = requireNativeModule('HeyCyanGlasses');
 
@@ -67,7 +67,7 @@ class HeyCyanManager {
   }
 
   // Device Controls
-  takePhoto(): Promise<boolean> {
+  takePhoto(): Promise<PhotoCaptureResult> {
     ensureNativeModule();
     log('takePhoto()');
     return HeyCyanGlasses.takePhoto();
@@ -191,9 +191,9 @@ class HeyCyanManager {
     return this.addListener('onMediaUpdate', callback);
   }
 
-  onPhotoReceived(callback: (photoBase64: string, photoId: string) => void): () => void {
-    return this.addListener<{ photoBase64: string; photoId: string }>('onPhotoReceived', (event) => {
-      callback(event.photoBase64, event.photoId);
+  onPhotoReceived(callback: (photoBase64: string, photoId: string, photoUri?: string) => void): () => void {
+    return this.addListener<{ photoBase64: string; photoId: string; photoUri?: string }>('onPhotoReceived', (event) => {
+      callback(event.photoBase64, event.photoId, event.photoUri);
     });
   }
 

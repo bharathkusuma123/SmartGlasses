@@ -18,6 +18,13 @@ export interface MediaCounts {
   audios: number;
 }
 
+export interface PhotoCaptureResult {
+  success: boolean;
+  beforeCount: number;
+  afterCount: number;
+  message: string;
+}
+
 export interface DeviceVersion {
   hardware: string;
   firmware: string;
@@ -76,7 +83,7 @@ export interface HeyCyanEvents {
   onBatteryUpdate: (status: BatteryStatus) => void;
   onMediaCountsUpdate: (counts: MediaCounts) => void;
   onMediaUpdate: (counts: MediaCounts) => void;
-  onPhotoReceived: (photoBase64: string, photoId: string) => void;  // New: when glasses take photo
+  onPhotoReceived: (photoBase64: string, photoId: string, photoUri?: string) => void;
   onPhotoStarted: (event: Record<string, unknown>) => void;
   onPhotoCompleted: (event: Record<string, unknown>) => void;
   onPhotoFailed: (event: Record<string, unknown>) => void;

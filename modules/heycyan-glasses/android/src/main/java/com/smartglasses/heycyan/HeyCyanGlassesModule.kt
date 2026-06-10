@@ -26,6 +26,7 @@ import com.oudmon.ble.base.scan.ScanRecord
 import com.oudmon.ble.base.scan.ScanWrapperCallback
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
@@ -199,8 +200,18 @@ class HeyCyanGlassesModule : Module() {
       sendCaptureStatus("preflight", "connected=$connected ready=$ready")
 
       if (!ensureDeviceReadyForCommand("takePhoto")) {
-        false
+        bundleOf(
+          "success" to false,
+          "beforeCount" to -1,
+          "afterCount" to -1,
+          "message" to "Device not ready"
+        )
       } else {
+        val beforeCounts = requestMediaCountsBlocking("photo-before")
+        val beforeCount = beforeCounts?.imageCount ?: -1
+        sdkLog("[SDK] Photo before media count: $beforeCount")
+        sendCaptureStatus("verify-before", "photos=$beforeCount")
+
         waitingForPhotoTransfer.set(true)
         photoDelivered.set(false)
         sendEvent("onPhotoStarted", bundleOf("timestamp" to System.currentTimeMillis()))
@@ -208,7 +219,31 @@ class HeyCyanGlassesModule : Module() {
         LargeDataHandler.getInstance().glassesControl(byteArrayOf(0x02, 0x01, 0x01)) { cmdType, response ->
           handleCaptureResponse(cmdType, response)
         }
-        true
+
+        Thread.sleep(3500)
+        val afterCounts = requestMediaCountsBlocking("photo-after")
+        val afterCount = afterCounts?.imageCount ?: -1
+        val success = beforeCount >= 0 && afterCount > beforeCount
+        val message = if (success) "Photo captured successfully" else "Photo capture could not be confirmed by media count"
+        val result = bundleOf(
+          "success" to success,
+          "beforeCount" to beforeCount,
+          "afterCount" to afterCount,
+          "message" to message
+        )
+
+        sdkLog("[SDK] Photo media-count verification: $result")
+        sendCaptureStatus(if (success) "captured" else "capture-unconfirmed", "before=$beforeCount after=$afterCount")
+
+        if (success) {
+          sendEvent("onPhotoCompleted", result)
+          requestPictureThumbnailsWithRetry()
+        } else {
+          waitingForPhotoTransfer.set(false)
+          sendEvent("onPhotoFailed", result)
+        }
+
+        result
       }
     }
 
@@ -235,19 +270,13 @@ class HeyCyanGlassesModule : Module() {
       }
 
       sdkLog("getMediaCounts(): sending glassesControl [0x02, 0x04]")
-      LargeDataHandler.getInstance().glassesControl(byteArrayOf(0x02, 0x04)) { _, response ->
-        if (response.dataType == 4) {
-          val payload = bundleOf(
-            "photos" to response.imageCount,
-            "videos" to response.videoCount,
-            "audios" to response.recordCount
-          )
-          sdkLog("onMediaCountsUpdate: $payload")
-          sendEvent("onMediaCountsUpdate", payload)
-          sendEvent("onMediaUpdate", payload)
-        }
+      val response = requestMediaCountsBlocking("manual")
+      if (response == null) {
+        sendError("[SDK] Media count request timed out")
+        bundleOf("photos" to -1, "videos" to -1, "audios" to -1, "error" to "Media count timeout")
+      } else {
+        mediaCountBundle(response)
       }
-      bundleOf("photos" to 0, "videos" to 0, "audios" to 0)
     }
 
     AsyncFunction("syncTime") {
@@ -712,11 +741,37 @@ class HeyCyanGlassesModule : Module() {
     return versionResponse
   }
 
+  private fun requestMediaCountsBlocking(reason: String): GlassModelControlResponse? {
+    val latch = CountDownLatch(1)
+    var mediaResponse: GlassModelControlResponse? = null
+    sdkLog("[SDK] Media Count Request reason=$reason")
+    LargeDataHandler.getInstance().glassesControl(byteArrayOf(0x02, 0x04)) { _, response ->
+      if (response.dataType == 4) {
+        mediaResponse = response
+        val payload = mediaCountBundle(response)
+        sdkLog("[SDK] Media Count Response reason=$reason $payload")
+        sendEvent("onMediaCountsUpdate", payload)
+        sendEvent("onMediaUpdate", payload)
+        latch.countDown()
+      } else {
+        sdkLog("[SDK] Media Count ignored response reason=$reason dataType=${response.dataType} errorCode=${response.errorCode}")
+      }
+    }
+    latch.await(8, TimeUnit.SECONDS)
+    return mediaResponse
+  }
+
   private fun deviceInfoBundle(response: DeviceInfoResponse) = bundleOf(
     "hardware" to response.hardwareVersion,
     "firmware" to response.firmwareVersion,
     "wifiHardware" to response.wifiHardwareVersion,
     "wifiFirmware" to response.wifiFirmwareVersion
+  )
+
+  private fun mediaCountBundle(response: GlassModelControlResponse) = bundleOf(
+    "photos" to response.imageCount,
+    "videos" to response.videoCount,
+    "audios" to response.recordCount
   )
 
   private fun hex(data: ByteArray): String = data.joinToString(" ") { "%02X".format(it) }
@@ -728,10 +783,18 @@ class HeyCyanGlassesModule : Module() {
     }
 
     waitingForPhotoTransfer.set(false)
+    val safeId = photoId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+    val fileName = if (safeId.endsWith(".jpg", true) || safeId.endsWith(".jpeg", true)) safeId else "$safeId.jpg"
+    val photoFile = File(application().cacheDir, fileName)
+    photoFile.writeBytes(photoBytes)
+    val uri = "file://${photoFile.absolutePath}"
+
     sendEvent("onPhotoReceived", bundleOf(
       "photoId" to photoId,
+      "photoUri" to uri,
       "photoBase64" to Base64.encodeToString(photoBytes, Base64.NO_WRAP)
     ))
+    sendCaptureStatus("photo", "Saved photo to $uri")
   }
 
   private fun downloadLatestPhoto(deviceIp: String) {

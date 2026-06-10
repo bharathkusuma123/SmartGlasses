@@ -135,9 +135,10 @@ const BluetoothScanner = () => {
         setMediaCounts(counts);
       }),
       
-      onPhotoReceived: HeyCyanManager.onPhotoReceived(async (photoBase64, photoId) => {
+      onPhotoReceived: HeyCyanManager.onPhotoReceived(async (photoBase64, photoId, photoUri) => {
         console.log('[HeyCyan UI] onPhotoReceived:', {
           photoId,
+          photoUri,
           base64Length: photoBase64?.length ?? 0,
         });
         clearPhotoTimeout();
@@ -146,7 +147,7 @@ const BluetoothScanner = () => {
         // Create photo object
         const newPhoto: CapturedPhoto = {
           id: photoId,
-          uri: `data:image/jpeg;base64,${photoBase64}`,
+          uri: photoUri ?? `data:image/jpeg;base64,${photoBase64}`,
           base64: photoBase64,
           timestamp: Date.now(),
           synced: false,
@@ -423,9 +424,10 @@ const takePhotoWithGlasses = async () => {
     
     console.log('Checking native SDK connection state before capture...');
     const sdkConnected = await HeyCyanManager.isConnected();
-    console.log('Native SDK connection state:', sdkConnected);
+    const sdkReady = await HeyCyanManager.isReady();
+    console.log('Native SDK connection state:', sdkConnected, 'ready:', sdkReady);
 
-    if (!sdkConnected) {
+    if (!sdkConnected || !sdkReady) {
       clearPhotoTimeout();
       photoConfirmedRef.current = false;
       setIsProcessing(false);
@@ -433,27 +435,24 @@ const takePhotoWithGlasses = async () => {
       return;
     }
 
-    photoTimeoutRef.current = setTimeout(() => {
-      console.log('[HeyCyan UI] takePhoto timeout: no capture confirmation received within 15s');
-      setIsProcessing(false);
-      photoConfirmedRef.current = false;
-      Alert.alert('Capture Timeout', 'Photo command was sent, but the glasses did not confirm the photo within 15 seconds.');
-      photoTimeoutRef.current = null;
-    }, 15000);
-
     // Try to take photo with more detailed error handling
     console.log('Calling HeyCyanManager.takePhoto()...');
-    const success = await HeyCyanManager.takePhoto();
-    console.log('takePhoto result:', success);
+    const result = await HeyCyanManager.takePhoto();
+    console.log('takePhoto result:', result);
     
-    if (!success) {
-      console.log('takePhoto returned false');
+    if (!result.success) {
+      console.log('takePhoto media-count verification failed');
       clearPhotoTimeout();
       photoConfirmedRef.current = false;
       setIsProcessing(false);
-      Alert.alert('Error', 'Failed to take photo. Please try again.');
+      Alert.alert('Capture Not Confirmed', result.message);
+      return;
     }
-    // Success case is confirmed by onCaptureStatus stage "captured".
+
+    clearPhotoTimeout();
+    photoConfirmedRef.current = true;
+    setIsProcessing(false);
+    Alert.alert('Photo Captured!', `Photos: ${result.beforeCount} -> ${result.afterCount}`);
   } catch (error) {
     console.error('Photo capture error details:', error);
     console.error('Error message:', getErrorMessage(error));
